@@ -12,29 +12,15 @@ from pypdf import PdfReader
 
 
 # =========================================================
-# PATHS
+# ENVIRONMENT VARIABLES
 # =========================================================
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-
-# Your .env is here:
-# project/day5/.env
-ENV_FILE = BASE_DIR / "day5" / ".env"
-
-load_dotenv(ENV_FILE)
-
-
-# =========================================================
-# GROQ
-# =========================================================
+load_dotenv()
 
 api_key = os.getenv("GROQ_API_KEY")
 
 if not api_key:
-    raise ValueError(
-        f"GROQ_API_KEY nahi mili.\n"
-        f"Please check: {ENV_FILE}"
-    )
+    raise ValueError("GROQ_API_KEY nahi mili.")
 
 client = Groq(api_key=api_key)
 
@@ -47,7 +33,7 @@ MODEL = "openai/gpt-oss-120b"
 
 app = FastAPI(
     title="Resume Analyzer API",
-    description="AI-powered Resume Analyzer with Resume Chat and Job Description Matching",
+    description="AI Resume Analyzer with Resume Chat and Job Description Matching",
     version="1.0.0",
 )
 
@@ -66,7 +52,7 @@ app.add_middleware(
 
 
 # =========================================================
-# FILE PATH
+# PATHS
 # =========================================================
 
 BACKEND_DIR = Path(__file__).resolve().parent
@@ -78,17 +64,8 @@ RESUME_PATH = UPLOAD_DIR / "uploaded_resume.pdf"
 
 
 # =========================================================
-# IN-MEMORY CHAT HISTORY
+# CHAT HISTORY
 # =========================================================
-# This keeps chat history while backend is running.
-#
-# Example:
-# [
-#     {
-#         "question": "...",
-#         "answer": "..."
-#     }
-# ]
 
 chat_history: list[dict[str, str]] = []
 
@@ -106,19 +83,17 @@ class JDMatchRequest(BaseModel):
 
 
 # =========================================================
-# PDF READER
+# PDF TEXT EXTRACTION
 # =========================================================
 
-def read_pdf(file_path: Path) -> str:
-    """
-    Extract text from a PDF resume.
-    """
+def read_pdf(path: Path) -> str:
 
-    reader = PdfReader(str(file_path))
+    reader = PdfReader(str(path))
 
     text = ""
 
     for page in reader.pages:
+
         page_text = page.extract_text()
 
         if page_text:
@@ -128,37 +103,32 @@ def read_pdf(file_path: Path) -> str:
 
 
 # =========================================================
-# GROQ JSON HELPER
+# HOME
 # =========================================================
 
-def call_groq_json(prompt: str) -> dict[str, Any]:
-    """
-    Send prompt to Groq and return parsed JSON.
-    """
+@app.get("/")
+def home():
 
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {
-                "role": "user",
-                "content": prompt,
-            }
-        ],
-        response_format={
-            "type": "json_object"
-        },
-    )
-
-    content = response.choices[0].message.content
-
-    if not content:
-        raise ValueError("AI ne empty response diya.")
-
-    return json.loads(content)
+    return {
+        "message": "Resume Analyzer Backend is running!"
+    }
 
 
 # =========================================================
-# ANALYZE RESUME
+# HEALTH CHECK
+# =========================================================
+
+@app.get("/health")
+def health():
+
+    return {
+        "status": "healthy",
+        "model": MODEL
+    }
+
+
+# =========================================================
+# RESUME ANALYSIS
 # =========================================================
 
 def analyze_resume(resume_text: str) -> dict[str, Any]:
@@ -211,32 +181,20 @@ Resume:
 -------------------------
 """
 
-    return call_groq_json(prompt)
+    response = client.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        response_format={
+            "type": "json_object"
+        }
+    )
 
-
-# =========================================================
-# HOME
-# =========================================================
-
-@app.get("/")
-def home():
-
-    return {
-        "message": "Resume Analyzer Backend is running!"
-    }
-
-
-# =========================================================
-# HEALTH CHECK
-# =========================================================
-
-@app.get("/health")
-def health():
-
-    return {
-        "status": "healthy",
-        "model": MODEL
-    }
+    return json.loads(response.choices[0].message.content)
 
 
 # =========================================================
@@ -248,73 +206,37 @@ async def analyze_resume_file(
     file: UploadFile = File(...)
 ):
 
-    # -----------------------------------------------------
-    # Check file
-    # -----------------------------------------------------
-
-    if not file.filename:
-        return {
-            "error": "Please select a resume file."
-        }
-
-    if not file.filename.lower().endswith(".pdf"):
-        return {
-            "error": "Please upload a PDF resume."
-        }
-
-    # -----------------------------------------------------
-    # Clear old chat history
-    # -----------------------------------------------------
-    # New resume = new conversation
-
-    chat_history.clear()
-
-    # -----------------------------------------------------
-    # Save uploaded PDF
-    # -----------------------------------------------------
-
-    contents = await file.read()
-
-    with open(RESUME_PATH, "wb") as f:
-        f.write(contents)
-
-    # -----------------------------------------------------
-    # Extract text
-    # -----------------------------------------------------
+    global chat_history
 
     try:
+
+        contents = await file.read()
+
+        with open(RESUME_PATH, "wb") as f:
+            f.write(contents)
+
         resume_text = read_pdf(RESUME_PATH)
 
-    except Exception as error:
-        return {
-            "error": f"PDF read nahi ho payi: {str(error)}"
-        }
+        if not resume_text.strip():
 
-    if not resume_text.strip():
-        return {
-            "error": "Could not extract text from this PDF."
-        }
+            return {
+                "error": "Could not extract text from this PDF."
+            }
 
-    # -----------------------------------------------------
-    # AI Analysis
-    # -----------------------------------------------------
-
-    try:
         result = analyze_resume(resume_text)
 
-    except Exception as error:
+        chat_history.clear()
+
         return {
-            "error": f"Resume analysis failed: {str(error)}"
+            "filename": file.filename,
+            "resume": result
         }
 
-    # -----------------------------------------------------
-    # Response
-    # -----------------------------------------------------
+    except Exception as e:
 
-    return {
-        "filename": file.filename,
-        "resume": result
-    }
+        return {
+            "error": str(e)
+        }
 
 
 # =========================================================
@@ -324,41 +246,19 @@ async def analyze_resume_file(
 @app.post("/chat")
 def chat(request: ChatRequest):
 
-    question = request.question.strip()
+    if not request.question.strip():
 
-    # -----------------------------------------------------
-    # Validate question
-    # -----------------------------------------------------
-
-    if not question:
         return {
             "error": "Please enter a question."
         }
 
-    # -----------------------------------------------------
-    # Check resume
-    # -----------------------------------------------------
-
     if not RESUME_PATH.exists():
+
         return {
             "error": "Please upload a resume first."
         }
 
-    # -----------------------------------------------------
-    # Read resume
-    # -----------------------------------------------------
-
-    try:
-        resume_text = read_pdf(RESUME_PATH)
-
-    except Exception as error:
-        return {
-            "error": f"Resume read nahi ho paya: {str(error)}"
-        }
-
-    # -----------------------------------------------------
-    # Previous chat history
-    # -----------------------------------------------------
+    resume_text = read_pdf(RESUME_PATH)
 
     previous_conversation = ""
 
@@ -373,9 +273,6 @@ AI:
 
 """
 
-    # -----------------------------------------------------
-    # Chat prompt
-    # -----------------------------------------------------
     prompt = f"""
 You are an AI assistant for a Resume Analyzer.
 
@@ -399,38 +296,35 @@ STRICT RESPONSE RULES:
 1. Use only information from the resume.
 2. Do not invent facts or make assumptions.
 3. If the answer is not available in the resume, say exactly:
-   "I don't have enough information in the resume to answer that."
+
+"I don't have enough information in the resume to answer that."
+
 4. Answer the user's question directly.
 5. Answer clearly, professionally, and naturally.
 6. Keep answers concise but useful.
 7. NEVER use HTML tags.
-8. NEVER use <br>, <p>, <div>, <ul>, <li>, or any other HTML tags.
-9. NEVER return raw HTML.
-10. Use normal line breaks between paragraphs.
-11. When listing multiple items, use Markdown bullet points starting with "-".
-12. Do not use unnecessary symbols or decorative formatting.
-13. Do not repeat the entire resume unless specifically asked.
-14. For education questions, use the education section.
-15. For qualification questions, identify the highest qualification
+8. NEVER return raw HTML.
+9. Use normal line breaks between paragraphs.
+10. When listing multiple items, use Markdown bullet points
+    starting with "-".
+11. Do not use unnecessary symbols or decorative formatting.
+12. Do not repeat the entire resume unless specifically asked.
+13. For education questions, use the education section.
+14. For qualification questions, identify the highest qualification
     available in the resume.
-16. For skills questions, use the skills mentioned in the resume.
-17. For experience questions, use internships and jobs mentioned.
-18. For project questions, use projects from the resume.
-19. For certification questions, use certifications from the resume.
-20. Previous conversation can be used to understand context,
+15. For skills questions, use the skills mentioned in the resume.
+16. For experience questions, use internships and jobs mentioned.
+17. For project questions, use projects from the resume.
+18. For certification questions, use certifications from the resume.
+19. Previous conversation can be used to understand context,
     but factual answers must still come from the resume.
-21. Do not output JSON for normal chat questions.
-22. Return only the natural-language answer to the user's question.
+20. Do not output JSON for normal chat questions.
+21. Return only the natural-language answer.
 
 Current user question:
 
-{question}
+{request.question}
 """
-
-    
-    # -----------------------------------------------------
-    # Call AI
-    # -----------------------------------------------------
 
     try:
 
@@ -447,34 +341,27 @@ Current user question:
         answer = response.choices[0].message.content
 
         if not answer:
+
             answer = "AI ne koi answer nahi diya."
 
-    except Exception as error:
+        chat_history.append(
+            {
+                "question": request.question,
+                "answer": answer
+            }
+        )
 
         return {
-            "error": f"AI chat failed: {str(error)}"
+            "question": request.question,
+            "answer": answer,
+            "history": chat_history
         }
 
-    # -----------------------------------------------------
-    # Save conversation
-    # -----------------------------------------------------
+    except Exception as e:
 
-    chat_history.append(
-        {
-            "question": question,
-            "answer": answer
+        return {
+            "error": str(e)
         }
-    )
-
-    # -----------------------------------------------------
-    # Return answer + full history
-    # -----------------------------------------------------
-
-    return {
-        "question": question,
-        "answer": answer,
-        "history": chat_history
-    }
 
 
 # =========================================================
@@ -511,21 +398,11 @@ def clear_chat_history():
 @app.post("/jd-match")
 def job_description_match(request: JDMatchRequest):
 
-    job_description = request.job_description.strip()
-
-    # -----------------------------------------------------
-    # Validate JD
-    # -----------------------------------------------------
-
-    if not job_description:
+    if not request.job_description.strip():
 
         return {
             "error": "Please enter a job description."
         }
-
-    # -----------------------------------------------------
-    # Check resume
-    # -----------------------------------------------------
 
     if not RESUME_PATH.exists():
 
@@ -533,23 +410,7 @@ def job_description_match(request: JDMatchRequest):
             "error": "Please upload a resume first."
         }
 
-    # -----------------------------------------------------
-    # Read resume
-    # -----------------------------------------------------
-
-    try:
-
-        resume_text = read_pdf(RESUME_PATH)
-
-    except Exception as error:
-
-        return {
-            "error": f"Resume read nahi ho paya: {str(error)}"
-        }
-
-    # -----------------------------------------------------
-    # JD Matching Prompt
-    # -----------------------------------------------------
+    resume_text = read_pdf(RESUME_PATH)
 
     prompt = f"""
 You are an expert ATS resume and job description analyzer.
@@ -606,27 +467,36 @@ CANDIDATE RESUME:
 JOB DESCRIPTION:
 
 -------------------------
-{job_description}
+{request.job_description}
 -------------------------
 """
 
-    # -----------------------------------------------------
-    # AI analysis
-    # -----------------------------------------------------
-
     try:
 
-        result = call_groq_json(prompt)
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            response_format={
+                "type": "json_object"
+            }
+        )
 
-    except Exception as error:
+        result = json.loads(
+            response.choices[0].message.content
+        )
 
         return {
-            "error": f"JD matching failed: {str(error)}"
+            "job_description": request.job_description,
+            "match": result
         }
 
-    
+    except Exception as e:
 
-    return {
-        "job_description": job_description,
-        "match": result
-    }
+        return {
+            "error": str(e)
+        }
